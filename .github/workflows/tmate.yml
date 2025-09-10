@@ -203,10 +203,121 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe" -TimeoutSec 60
           Write-Host "✅ Cloudflared downloaded"
           
+          Write-Host "🔍 Pre-check: Testing localhost:6080..."
+          try {
+            $testWeb = Invoke-WebRequest -Uri "http://localhost:6080" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+            Write-Host "✅ Local noVNC is accessible"
+          } catch {
+            Write-Host "❌ Local noVNC not accessible: $_"
+          }
+          
+          Write-Host "🔍 Checking internet connection..."
+          try {
+            $testInternet = Test-NetConnection -ComputerName "google.com" -Port 443 -InformationLevel Quiet
+            if ($testInternet) {
+              Write-Host "✅ Internet connection OK"
+            } else {
+              Write-Host "❌ No internet connection"
+            }
+          } catch {
+            Write-Host "⚠️ Internet check failed: $_"
+          }
+          
           Write-Host "🌐 Starting Cloudflared tunnel..."
-          Start-Process -FilePath "cloudflared.exe" -ArgumentList "tunnel", "--url", "http://localhost:6080", "--no-autoupdate", "--edge-ip-version", "auto", "--protocol", "http2", "--logfile", "cloudflared.log" -WindowStyle Hidden
-          Start-Sleep -Seconds 40
-          Get-Content "cloudflared.log" -ErrorAction SilentlyContinue | Write-Host
+          Stop-Process -Name "cloudflared" -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+
+          $cloudflaredProcess = Start-Process -FilePath "cloudflared.exe" -ArgumentList "tunnel", "--url", "http://localhost:6080", "--no-autoupdate", "--logfile", "cloudflared.log", "--loglevel", "info" -WindowStyle Hidden -PassThru
+          Write-Host "✅ Cloudflared started with PID: $($cloudflaredProcess.Id)"
+          Start-Sleep -Seconds 10
+
+          Write-Host "🌐 Retrieving Cloudflared URL..."
+          $maxAttempts = 30
+          $attempt = 0
+          $cloudflaredUrl = ""
+          $urlFound = $false
+
+          do {
+            $attempt++
+            Write-Host "🔄 Checking Cloudflared URL (attempt $attempt/$maxAttempts)"
+            Start-Sleep -Seconds 2
+            
+            if (Test-Path "cloudflared.log") {
+              try {
+                $logContent = Get-Content "cloudflared.log" -Raw -ErrorAction SilentlyContinue
+                if ($logContent -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                  $cloudflaredUrl = $matches[0]
+                  Write-Host "✅ Found Cloudflared URL: $cloudflaredUrl"
+                  $urlFound = $true
+                  break
+                }
+                elseif ($logContent -match '(\bhttps?://[^\s]+trycloudflare[^\s]+)') {
+                  $cloudflaredUrl = $matches[1]
+                  Write-Host "✅ Found Cloudflared URL (alternative pattern): $cloudflaredUrl"
+                  $urlFound = $true
+                  break
+                }
+                else {
+                  Write-Host "📋 Cloudflared log content (last 5 lines):"
+                  Get-Content "cloudflared.log" | Select-Object -Last 5 | Write-Host
+                }
+              } catch {
+                Write-Host "⚠️ Error reading cloudflared.log: $_"
+              }
+            } else {
+              Write-Host "❌ cloudflared.log file not found"
+            }
+            
+            $cloudflaredRunning = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+            if (-not $cloudflaredRunning) {
+              Write-Host "❌ Cloudflared process died, restarting..."
+              Stop-Process -Name "cloudflared" -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 2
+              $cloudflaredProcess = Start-Process -FilePath "cloudflared.exe" -ArgumentList "tunnel", "--url", "http://localhost:6080", "--no-autoupdate", "--logfile", "cloudflared.log", "--loglevel", "debug" -WindowStyle Hidden -PassThru
+              Write-Host "✅ Cloudflared restarted with PID: $($cloudflaredProcess.Id)"
+              Start-Sleep -Seconds 10
+            }
+            
+            if (-not $urlFound -and $attempt -ge 5) {
+              try {
+                Write-Host "🔍 Trying to get URL from cloudflared command..."
+                $urlInfo = & .\cloudflared.exe tunnel --url http://localhost:6080 --no-autoupdate --logfile cloudflared_temp.log --loglevel info 2>&1 | Select-String "trycloudflare"
+                if ($urlInfo -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                  $cloudflaredUrl = $matches[0]
+                  Write-Host "✅ Found Cloudflared URL from command: $cloudflaredUrl"
+                  $urlFound = $true
+                  break
+                }
+              } catch {
+                Write-Host "⚠️ Failed to get URL from command: $_"
+              }
+            }
+            
+          } while ($attempt -lt $maxAttempts -and -not $urlFound)
+
+          if (-not $urlFound) {
+            Write-Host "❌ Failed to retrieve Cloudflared URL after $maxAttempts attempts"
+            Write-Host "📋 Full cloudflared.log content:"
+            Get-Content "cloudflared.log" -ErrorAction SilentlyContinue | Write-Host
+            
+            Write-Host "🔄 Trying alternative method to get Cloudflared URL..."
+            try {
+              Stop-Process -Name "cloudflared" -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 3
+              
+              $cloudflaredOutput = & .\cloudflared.exe tunnel --url http://localhost:6080 --no-autoupdate 2>&1
+              Write-Host "📋 Cloudflared direct output:"
+              $cloudflaredOutput | Write-Host
+              
+              if ($cloudflaredOutput -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                $cloudflaredUrl = $matches[0]
+                Write-Host "✅ Found Cloudflared URL from direct output: $cloudflaredUrl"
+                $urlFound = $true
+              }
+            } catch {
+              Write-Host "⚠️ Alternative method also failed: $_"
+            }
+          }
           
           Write-Host "🚀 Checking noVNC and retrieving Cloudflared URL..."
           
@@ -282,39 +393,6 @@ jobs:
             Get-Content "websockify_error.log" -ErrorAction SilentlyContinue | Write-Host
             exit 1
           }
-          
-          Write-Host "🌐 Retrieving Cloudflared URL..."
-          $maxAttempts = 180
-          $attempt = 0
-          $cloudflaredUrl = ""
-          
-          do {
-            $attempt++
-            Write-Host "🔄 Checking Cloudflared URL (attempt $attempt/$maxAttempts)"
-            Start-Sleep -Seconds 3
-            
-            if (Test-Path "cloudflared.log") {
-              try {
-                $logContent = Get-Content "cloudflared.log" -Raw -ErrorAction SilentlyContinue
-                if ($logContent -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
-                  $cloudflaredUrl = $matches[0]
-                  Write-Host "✅ Found Cloudflared URL: $cloudflaredUrl"
-                  break
-                }
-              } catch {
-                Write-Host "⚠️ Error reading cloudflared.log: $_"
-              }
-            }
-            
-            if ($attempt % 20 -eq 0) {
-              Write-Host "🔄 Restarting Cloudflared..."
-              Stop-Process -Name "cloudflared" -Force -ErrorAction SilentlyContinue
-              Start-Sleep -Seconds 3
-              Start-Process -FilePath "cloudflared.exe" -ArgumentList "tunnel", "--url", "http://localhost:6080", "--no-autoupdate", "--edge-ip-version", "auto", "--protocol", "http2", "--logfile", "cloudflared.log" -WindowStyle Hidden
-              Start-Sleep -Seconds 40
-              Get-Content "cloudflared.log" -ErrorAction SilentlyContinue | Write-Host
-            }
-          } while ($attempt -lt $maxAttempts)
           
           if ($cloudflaredUrl) {
             $remoteLink = "$cloudflaredUrl/vnc.html"
