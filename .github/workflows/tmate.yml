@@ -133,7 +133,7 @@ jobs:
                 try {
                   Write-Host "📥 Downloading custom noVNC from Cudatto1m (attempt $i/$maxDownloadAttempts)..."
                   Remove-Item -Recurse -Force noVNC -ErrorAction SilentlyContinue
-                  $novncUrl = "https://github.com/Cudatto1m/noVNC-Custom/archive/refs/heads/master.zip"
+                  $novncUrl = "https://github.com/novnc/noVNC/archive/refs/heads/master.zip"
                   Write-Host "🔗 Using URL: $novncUrl"
                   $response = Invoke-WebRequest -Uri $novncUrl -OutFile "noVNC.zip" -TimeoutSec 60 -PassThru
                   Write-Host "ℹ️ HTTP Status: $($response.StatusCode) $($response.StatusDescription)"
